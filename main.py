@@ -7,18 +7,17 @@ import smtplib
 from email.message import EmailMessage
 from email.utils import formataddr
 
-# Email config - from GitHub secrets (must match your yml env names)
-EMAIL_ADDRESS = os.getenv('EMAIL_ADDRESS')     # Your Gmail address
-EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')   # Your app password
-EMAIL_TO = os.getenv('EMAIL_TO')               # Recipient email
+# Email config from environment variables (must match GitHub secrets)
+EMAIL_ADDRESS = os.getenv('EMAIL_ADDRESS')
+EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
+EMAIL_TO = os.getenv('EMAIL_TO')
 
 if not EMAIL_ADDRESS or not EMAIL_PASSWORD or not EMAIL_TO:
-    raise ValueError("❌ Missing EMAIL_ADDRESS, EMAIL_PASSWORD, or EMAIL_TO in GitHub secrets.")
+    raise ValueError("❌ Missing EMAIL_ADDRESS, EMAIL_PASSWORD, or EMAIL_TO environment variables.")
 
-# Set up folder path
+# Setup folder path and tracking file path
 folder_path = os.path.join(os.path.dirname(__file__), 'data')
 os.makedirs(folder_path, exist_ok=True)
-
 tracking_file = os.path.join(folder_path, 'listing_first_seen.csv')
 
 def check_removed_listings_against_vls(removed_listings, vls_data):
