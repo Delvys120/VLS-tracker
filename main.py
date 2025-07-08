@@ -3,6 +3,8 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 import re
+import smtplib
+from email.message import EmailMessage
 
 # Set up folder path
 folder_path = os.path.join(os.path.dirname(__file__), 'data')
@@ -15,6 +17,23 @@ def check_removed_listings_against_vls(removed_listings, vls_data):
     vls_ulikeys = [home.get("ULIKey") for home in vls_data]
     truly_removed = [uli for uli in removed_ulikeys if uli not in vls_ulikeys]
     return truly_removed
+
+def send_email_with_attachments(subject, body, attachments):
+    msg = EmailMessage()
+    msg["From"] = os.getenv("GMAIL_USER")
+    msg["To"] = os.getenv("EMAIL_RECIPIENT")
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    for file_path in attachments:
+        with open(file_path, "rb") as f:
+            file_data = f.read()
+            file_name = os.path.basename(file_path)
+        msg.add_attachment(file_data, maintype="application", subtype="octet-stream", filename=file_name)
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(os.getenv("GMAIL_USER"), os.getenv("GMAIL_APP_PASSWORD"))
+        smtp.send_message(msg)
 
 def main():
     print("[▶️] Script started")
@@ -35,7 +54,6 @@ def main():
     print(f"[🏡] Filtered PreOwned & Active homes: {len(filtered_homes)}")
 
     today = datetime.now().strftime('%Y-%m-%d')
-    today_date = datetime.now().date()
     today_filename = f'VLS_{today}.csv'
     today_full_path = os.path.join(folder_path, today_filename)
 
@@ -75,6 +93,8 @@ def main():
         df_previous = pd.read_csv(latest_full_path)
         print(f"[✅] Latest previous VLS file loaded: {latest_file}")
 
+    expired_files_to_send = []
+
     if not df_previous.empty:
         df_previous_active = df_previous[df_previous['Status'] == 'A']
         removed = df_previous_active[~df_previous_active['ULIKey'].isin(df_today['ULIKey'])]
@@ -87,6 +107,7 @@ def main():
                 expired_full_path = os.path.join(folder_path, expired_filename)
                 truly_removed_df.to_csv(expired_full_path, index=False, encoding='utf-8-sig')
                 print(f"[📂] Truly expired listings saved as {expired_filename}")
+                expired_files_to_send.append(expired_full_path)
             else:
                 print("[✅] No truly expired listings found today.")
         else:
@@ -100,8 +121,10 @@ def main():
         df_tracking = pd.read_csv(tracking_file)
         print(f"[✅] Loaded tracking data for {len(df_tracking)} listings")
     else:
-        df_tracking = pd.DataFrame(columns=['ULIKey', 'FirstSeen', 'Address', 'Village', 'Price', 'VLSNumber'])
+        df_tracking = pd.DataFrame(columns=['ULIKey', 'FirstSeen', 'Address', 'Village', 'Price', 'VLSNumber', 'DaysOnMarket'])
         print("[🆕] Created new tracking database")
+
+    today_date = datetime.now().date()
 
     new_listings = []
     for _, home in df_today.iterrows():
@@ -112,45 +135,58 @@ def main():
                 'Address': home['Address'],
                 'Village': home['Village'],
                 'Price': home['Price'],
-                'VLSNumber': home['VLSNumber']
+                'VLSNumber': home['VLSNumber'],
+                'DaysOnMarket': 0
             })
 
     if new_listings:
         df_tracking = pd.concat([df_tracking, pd.DataFrame(new_listings)], ignore_index=True)
         print(f"[➕] Added {len(new_listings)} new listings to tracking database")
 
-    df_tracking['FirstSeen'] = pd.to_datetime(df_tracking['FirstSeen'], errors='coerce')
-    df_tracking['DaysOnMarket'] = df_tracking['FirstSeen'].apply(
-        lambda d: (today_date - d.date()).days if not pd.isna(d) else None
-    )
+    # Ensure FirstSeen is datetime
+    df_tracking['FirstSeen'] = pd.to_datetime(df_tracking['FirstSeen'])
+    df_tracking['DaysOnMarket'] = (today_date - df_tracking['FirstSeen'].dt.date).dt.days
 
-    # Save updated tracking file (now includes DaysOnMarket)
-    df_tracking = df_tracking.sort_values(by='DaysOnMarket', ascending=False)
-    df_tracking.to_csv(tracking_file, index=False, encoding='utf-8-sig')
-    print(f"[💾] Updated tracking database with {len(df_tracking)} total listings")
-
-    # Optional: also save a daily snapshot of the 5+ month aged listings
     five_months_ago = pd.to_datetime(today_date - timedelta(days=150))
+
+    active_ulikeys = df_today['ULIKey'].tolist()
     aged_listings = df_tracking[
-        (df_tracking['ULIKey'].isin(df_today['ULIKey'])) &
+        (df_tracking['ULIKey'].isin(active_ulikeys)) &
         (df_tracking['FirstSeen'] <= five_months_ago)
     ]
 
-    if not aged_listings.empty:
-        current_aged = df_today[df_today['ULIKey'].isin(aged_listings['ULIKey'])].merge(
-            df_tracking[['ULIKey', 'FirstSeen', 'DaysOnMarket']],
-            on='ULIKey',
-            how='left'
-        )
-        current_aged = current_aged.sort_values(by='DaysOnMarket', ascending=False)
+    df_tracking.to_csv(tracking_file, index=False, encoding='utf-8-sig')
+    print(f"[💾] Updated tracking database with {len(df_tracking)} total listings")
 
-        aged_filename = f'5 Month Listings {today}.csv'
-        aged_full_path = os.path.join(folder_path, aged_filename)
-        current_aged.to_csv(aged_full_path, index=False, encoding='utf-8-sig')
-        print(f"[🏠] Found {len(current_aged)} listings on market 5+ months")
-        print(f"[📊] Saved as '{aged_filename}'")
+    # Sort tracking data by DaysOnMarket descending for output email
+    df_tracking_sorted = df_tracking.sort_values(by='DaysOnMarket', ascending=False)
+    df_tracking_sorted.to_csv(tracking_file, index=False, encoding='utf-8-sig')
+
+    # Prepare attachments for email
+    attachments = [today_full_path, tracking_file] + expired_files_to_send
+
+    # Compose email body
+    body = f"""
+[▶️] Script started
+[✅] Total homes received: {len(all_homes)}
+[🏡] Filtered PreOwned & Active homes: {len(filtered_homes)}
+[💾] Today's listings saved as {today_filename}
+"""
+
+    if expired_files_to_send:
+        body += f"[📂] Truly expired listings saved and attached.\n"
+
+    body += f"[🕒] Tracking listings age...\n"
+    body += f"[💾] Updated tracking database with {len(df_tracking)} total listings\n"
+
+    aged_count = len(aged_listings)
+    if aged_count > 0:
+        body += f"[✅] Listings on market 5+ months: {aged_count}\n"
     else:
-        print("[✅] No listings have been on the market for 5+ months")
+        body += f"[✅] No listings have been on the market for 5+ months\n"
+
+    # Send the email
+    send_email_with_attachments(f"VLS Tracker Report - {today}", body, attachments)
 
 if __name__ == '__main__':
     main()
