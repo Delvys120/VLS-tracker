@@ -7,10 +7,10 @@ import smtplib
 from email.message import EmailMessage
 from email.utils import formataddr
 
-# Email config - replace these with your info or use GitHub secrets
-EMAIL_ADDRESS = os.getenv('EMAIL_USER')  # Your Gmail address
-EMAIL_PASSWORD = os.getenv('EMAIL_PASS')  # Your app password
-EMAIL_TO = os.getenv('EMAIL_TO')  # Recipient email
+# Email config - from GitHub secrets
+EMAIL_ADDRESS = os.getenv('EMAIL_USER')      # Your Gmail address
+EMAIL_PASSWORD = os.getenv('EMAIL_PASS')     # Your app password
+EMAIL_TO = os.getenv('EMAIL_TO')             # Recipient email
 
 # Set up folder path
 folder_path = os.path.join(os.path.dirname(__file__), 'data')
@@ -147,14 +147,10 @@ def main():
         df_tracking = pd.concat([df_tracking, pd.DataFrame(new_listings)], ignore_index=True)
         print(f"[➕] Added {len(new_listings)} new listings to tracking database")
 
-    # Ensure FirstSeen is datetime type
     df_tracking['FirstSeen'] = pd.to_datetime(df_tracking['FirstSeen'], errors='coerce')
-
-    # Calculate DaysOnMarket as integer days difference
-    df_tracking['DaysOnMarket'] = (today_date - df_tracking['FirstSeen'].dt.date).dt.days
+    df_tracking['DaysOnMarket'] = (today_date - df_tracking['FirstSeen'].dt.date).apply(lambda d: d.days)
 
     active_ulikeys = df_today['ULIKey'].tolist()
-    # Filter aged listings: only those tracked 5 months or more (approx 150 days)
     aged_listings = df_tracking[
         (df_tracking['ULIKey'].isin(active_ulikeys)) &
         (df_tracking['DaysOnMarket'] >= 150)
@@ -175,7 +171,7 @@ def main():
     else:
         print("[✅] No listings have been on the market for 5+ months")
 
-    # Compose email content
+    # Compose email
     email_subject = f"VLS Tracker Report - {today}"
     email_body = (
         f"Script run summary:\n\n"
@@ -186,7 +182,6 @@ def main():
         f"Listings on market 5+ months: {len(aged_listings)}\n"
     )
 
-    # Prepare attachments list
     attachments = []
     if expired_full_path and os.path.exists(expired_full_path):
         attachments.append(expired_full_path)
@@ -195,7 +190,6 @@ def main():
     if aged_full_path and os.path.exists(aged_full_path):
         attachments.append(aged_full_path)
 
-    # Send email only if attachments exist
     if attachments:
         send_email_with_attachments(email_subject, email_body, attachments)
         print("[✉️] Email sent with attachments.")
