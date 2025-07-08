@@ -7,11 +7,10 @@ import smtplib
 from email.message import EmailMessage
 from email.utils import formataddr
 
-# Load secrets from environment (GitHub Actions)
-EMAIL_ADDRESS = os.getenv('EMAIL_ADDRESS')
-EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
+# Email config from GitHub Secrets
+EMAIL_ADDRESS = os.getenv('EMAIL_USER')
+EMAIL_PASSWORD = os.getenv('EMAIL_PASS')
 EMAIL_TO = os.getenv('EMAIL_TO')
-
 
 # Validate secrets
 if not EMAIL_ADDRESS or not EMAIL_PASSWORD or not EMAIL_TO:
@@ -49,6 +48,7 @@ def send_email_with_attachments(subject, body, attachments):
 def main():
     print("[▶️] Script started")
 
+    # Fetch today's VLS data
     url = "https://api.thevillages.com/hf/search/allhomelisting"
     response = requests.get(url)
     response.raise_for_status()
@@ -104,6 +104,7 @@ def main():
         print(f"[✅] Latest previous VLS file loaded: {latest_file}")
 
     expired_full_path = None
+    expired_count = 0
 
     if not df_previous.empty:
         df_previous_active = df_previous[df_previous['Status'] == 'A']
@@ -116,6 +117,7 @@ def main():
                 expired_filename = f'VLS expired {today}.csv'
                 expired_full_path = os.path.join(folder_path, expired_filename)
                 truly_removed_df.to_csv(expired_full_path, index=False, encoding='utf-8-sig')
+                expired_count = len(truly_removed_df)
                 print(f"[📂] Truly expired listings saved as {expired_filename}")
             else:
                 print("[✅] No truly expired listings found today.")
@@ -154,14 +156,14 @@ def main():
     df_tracking['FirstSeen'] = pd.to_datetime(df_tracking['FirstSeen'], errors='coerce')
     df_tracking['DaysOnMarket'] = (today_date - df_tracking['FirstSeen'].dt.date).apply(lambda d: d.days)
 
-    df_tracking.to_csv(tracking_file, index=False, encoding='utf-8-sig')
-    print(f"[💾] Updated tracking database with {len(df_tracking)} total listings")
-
     active_ulikeys = df_today['ULIKey'].tolist()
     aged_listings = df_tracking[
         (df_tracking['ULIKey'].isin(active_ulikeys)) &
         (df_tracking['DaysOnMarket'] >= 150)
     ].sort_values(by='DaysOnMarket', ascending=False)
+
+    df_tracking.to_csv(tracking_file, index=False, encoding='utf-8-sig')
+    print(f"[💾] Updated tracking database with {len(df_tracking)} total listings")
 
     aged_filename = None
     aged_full_path = None
@@ -175,7 +177,7 @@ def main():
     else:
         print("[✅] No listings have been on the market for 5+ months")
 
-    # Compose email content
+    # Compose email body including expired count
     email_subject = f"VLS Tracker Report - {today}"
     email_body = (
         f"Script run summary:\n\n"
@@ -184,6 +186,7 @@ def main():
         f"New listings added to tracking database: {len(new_listings)}\n"
         f"Total tracked listings: {len(df_tracking)}\n"
         f"Listings on market 5+ months: {len(aged_listings)}\n"
+        f"Listings expired today: {expired_count}\n"
     )
 
     attachments = []
