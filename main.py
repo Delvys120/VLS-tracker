@@ -35,6 +35,7 @@ def main():
     print(f"[🏡] Filtered PreOwned & Active homes: {len(filtered_homes)}")
 
     today = datetime.now().strftime('%Y-%m-%d')
+    today_date = datetime.now().date()
     today_filename = f'VLS_{today}.csv'
     today_full_path = os.path.join(folder_path, today_filename)
 
@@ -102,8 +103,6 @@ def main():
         df_tracking = pd.DataFrame(columns=['ULIKey', 'FirstSeen', 'Address', 'Village', 'Price', 'VLSNumber'])
         print("[🆕] Created new tracking database")
 
-    today_date = datetime.now().date()
-
     new_listings = []
     for _, home in df_today.iterrows():
         if home['ULIKey'] not in df_tracking['ULIKey'].values:
@@ -120,28 +119,29 @@ def main():
         df_tracking = pd.concat([df_tracking, pd.DataFrame(new_listings)], ignore_index=True)
         print(f"[➕] Added {len(new_listings)} new listings to tracking database")
 
-    # ➕ Add DaysOnMarket and sort by it
-    df_tracking['FirstSeen'] = pd.to_datetime(df_tracking['FirstSeen'])
-    df_tracking['DaysOnMarket'] = (today_date - df_tracking['FirstSeen'].dt.date).dt.days
+    df_tracking['FirstSeen'] = pd.to_datetime(df_tracking['FirstSeen'], errors='coerce')
+    df_tracking['DaysOnMarket'] = df_tracking['FirstSeen'].apply(
+        lambda d: (today_date - d.date()).days if not pd.isna(d) else None
+    )
+
+    # Save updated tracking file (now includes DaysOnMarket)
     df_tracking = df_tracking.sort_values(by='DaysOnMarket', ascending=False)
-
-    five_months_ago = pd.to_datetime(today_date - timedelta(days=150))
-    active_ulikeys = df_today['ULIKey'].tolist()
-    aged_listings = df_tracking[
-        (df_tracking['ULIKey'].isin(active_ulikeys)) &
-        (df_tracking['FirstSeen'] <= five_months_ago)
-    ]
-
     df_tracking.to_csv(tracking_file, index=False, encoding='utf-8-sig')
     print(f"[💾] Updated tracking database with {len(df_tracking)} total listings")
 
+    # Optional: also save a daily snapshot of the 5+ month aged listings
+    five_months_ago = pd.to_datetime(today_date - timedelta(days=150))
+    aged_listings = df_tracking[
+        (df_tracking['ULIKey'].isin(df_today['ULIKey'])) &
+        (df_tracking['FirstSeen'] <= five_months_ago)
+    ]
+
     if not aged_listings.empty:
         current_aged = df_today[df_today['ULIKey'].isin(aged_listings['ULIKey'])].merge(
-            df_tracking[['ULIKey', 'FirstSeen']],
+            df_tracking[['ULIKey', 'FirstSeen', 'DaysOnMarket']],
             on='ULIKey',
             how='left'
         )
-        current_aged['DaysOnMarket'] = (today_date - current_aged['FirstSeen'].dt.date).dt.days
         current_aged = current_aged.sort_values(by='DaysOnMarket', ascending=False)
 
         aged_filename = f'5 Month Listings {today}.csv'
