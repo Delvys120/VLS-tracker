@@ -149,7 +149,9 @@ def main():
 
     # Fix: Ensure FirstSeen is datetime before using .dt accessor
     df_tracking['FirstSeen'] = pd.to_datetime(df_tracking['FirstSeen'], errors='coerce')
-    df_tracking['DaysOnMarket'] = (today_date - df_tracking['FirstSeen'].dt.date).dt.days
+
+    # Correct calculation of DaysOnMarket without double .dt chaining
+    df_tracking['DaysOnMarket'] = (pd.Timestamp(today_date) - df_tracking['FirstSeen']).dt.days
 
     active_ulikeys = df_today['ULIKey'].tolist()
     aged_listings = df_tracking[
