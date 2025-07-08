@@ -1,16 +1,20 @@
 import os
 import pandas as pd
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
 import smtplib
 from email.message import EmailMessage
 from email.utils import formataddr
 
-# Email config - from GitHub secrets
+# Load secrets from environment (GitHub Actions)
 EMAIL_ADDRESS = os.getenv('EMAIL_USER')      # Your Gmail address
 EMAIL_PASSWORD = os.getenv('EMAIL_PASS')     # Your app password
 EMAIL_TO = os.getenv('EMAIL_TO')             # Recipient email
+
+# Validate secrets
+if not EMAIL_ADDRESS or not EMAIL_PASSWORD or not EMAIL_TO:
+    raise ValueError("❌ Missing EMAIL_USER, EMAIL_PASS, or EMAIL_TO in GitHub secrets.")
 
 # Set up folder path
 folder_path = os.path.join(os.path.dirname(__file__), 'data')
@@ -44,7 +48,6 @@ def send_email_with_attachments(subject, body, attachments):
 def main():
     print("[▶️] Script started")
 
-    # Fetch today's VLS data
     url = "https://api.thevillages.com/hf/search/allhomelisting"
     response = requests.get(url)
     response.raise_for_status()
@@ -150,14 +153,14 @@ def main():
     df_tracking['FirstSeen'] = pd.to_datetime(df_tracking['FirstSeen'], errors='coerce')
     df_tracking['DaysOnMarket'] = (today_date - df_tracking['FirstSeen'].dt.date).apply(lambda d: d.days)
 
+    df_tracking.to_csv(tracking_file, index=False, encoding='utf-8-sig')
+    print(f"[💾] Updated tracking database with {len(df_tracking)} total listings")
+
     active_ulikeys = df_today['ULIKey'].tolist()
     aged_listings = df_tracking[
         (df_tracking['ULIKey'].isin(active_ulikeys)) &
         (df_tracking['DaysOnMarket'] >= 150)
     ].sort_values(by='DaysOnMarket', ascending=False)
-
-    df_tracking.to_csv(tracking_file, index=False, encoding='utf-8-sig')
-    print(f"[💾] Updated tracking database with {len(df_tracking)} total listings")
 
     aged_filename = None
     aged_full_path = None
@@ -171,7 +174,7 @@ def main():
     else:
         print("[✅] No listings have been on the market for 5+ months")
 
-    # Compose email
+    # Compose email content
     email_subject = f"VLS Tracker Report - {today}"
     email_body = (
         f"Script run summary:\n\n"
