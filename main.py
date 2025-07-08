@@ -8,9 +8,10 @@ from email.message import EmailMessage
 from email.utils import formataddr
 
 # Load secrets from environment (GitHub Actions)
-EMAIL_ADDRESS = os.getenv('EMAIL_USER')      # Your Gmail address
-EMAIL_PASSWORD = os.getenv('EMAIL_PASS')     # Your app password
-EMAIL_TO = os.getenv('EMAIL_TO')             # Recipient email
+EMAIL_ADDRESS = os.getenv('EMAIL_ADDRESS')
+EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
+EMAIL_TO = os.getenv('EMAIL_TO')
+
 
 # Validate secrets
 if not EMAIL_ADDRESS or not EMAIL_PASSWORD or not EMAIL_TO:
