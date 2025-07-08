@@ -7,14 +7,13 @@ import smtplib
 from email.message import EmailMessage
 from email.utils import formataddr
 
-# Email config from GitHub Secrets
-EMAIL_ADDRESS = os.getenv('EMAIL_USER')
-EMAIL_PASSWORD = os.getenv('EMAIL_PASS')
-EMAIL_TO = os.getenv('EMAIL_TO')
+# Email config - from GitHub secrets (must match your yml env names)
+EMAIL_ADDRESS = os.getenv('EMAIL_ADDRESS')     # Your Gmail address
+EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')   # Your app password
+EMAIL_TO = os.getenv('EMAIL_TO')               # Recipient email
 
-# Validate secrets
 if not EMAIL_ADDRESS or not EMAIL_PASSWORD or not EMAIL_TO:
-    raise ValueError("❌ Missing EMAIL_USER, EMAIL_PASS, or EMAIL_TO in GitHub secrets.")
+    raise ValueError("❌ Missing EMAIL_ADDRESS, EMAIL_PASSWORD, or EMAIL_TO in GitHub secrets.")
 
 # Set up folder path
 folder_path = os.path.join(os.path.dirname(__file__), 'data')
@@ -114,10 +113,10 @@ def main():
             truly_removed = check_removed_listings_against_vls(removed, all_homes)
             if truly_removed:
                 truly_removed_df = removed[removed['ULIKey'].isin(truly_removed)]
+                expired_count = len(truly_removed_df)
                 expired_filename = f'VLS expired {today}.csv'
                 expired_full_path = os.path.join(folder_path, expired_filename)
                 truly_removed_df.to_csv(expired_full_path, index=False, encoding='utf-8-sig')
-                expired_count = len(truly_removed_df)
                 print(f"[📂] Truly expired listings saved as {expired_filename}")
             else:
                 print("[✅] No truly expired listings found today.")
@@ -177,7 +176,7 @@ def main():
     else:
         print("[✅] No listings have been on the market for 5+ months")
 
-    # Compose email body including expired count
+    # Compose email content including expired count
     email_subject = f"VLS Tracker Report - {today}"
     email_body = (
         f"Script run summary:\n\n"
@@ -186,7 +185,7 @@ def main():
         f"New listings added to tracking database: {len(new_listings)}\n"
         f"Total tracked listings: {len(df_tracking)}\n"
         f"Listings on market 5+ months: {len(aged_listings)}\n"
-        f"Listings expired today: {expired_count}\n"
+        f"Expired listings today: {expired_count}\n"
     )
 
     attachments = []
