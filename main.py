@@ -4,20 +4,22 @@ import requests
 from datetime import datetime, timedelta
 import re
 
-# Folder setup
+# Set up folder path
 folder_path = os.path.join(os.path.dirname(__file__), 'data')
 os.makedirs(folder_path, exist_ok=True)
+
 tracking_file = os.path.join(folder_path, 'listing_first_seen.csv')
 
 def check_removed_listings_against_vls(removed_listings, vls_data):
     removed_ulikeys = removed_listings['ULIKey'].tolist()
     vls_ulikeys = [home.get("ULIKey") for home in vls_data]
-    return [uli for uli in removed_ulikeys if uli not in vls_ulikeys]
+    truly_removed = [uli for uli in removed_ulikeys if uli not in vls_ulikeys]
+    return truly_removed
 
 def main():
     print("[▶️] Script started")
 
-    # Fetch data
+    # Fetch today's VLS data
     url = "https://api.thevillages.com/hf/search/allhomelisting"
     response = requests.get(url)
     response.raise_for_status()
@@ -62,15 +64,15 @@ def main():
     vls_files = [f for f in os.listdir(folder_path) if re.match(r'VLS_\d{4}-\d{2}-\d{2}\.csv', f)]
     vls_files = [f for f in vls_files if f != today_filename]
 
-    df_previous = pd.DataFrame()
-    if vls_files:
+    if not vls_files:
+        print("[❌] No previous VLS files found.")
+        df_previous = pd.DataFrame()
+    else:
         vls_files.sort(reverse=True)
         latest_file = vls_files[0]
         latest_full_path = os.path.join(folder_path, latest_file)
         df_previous = pd.read_csv(latest_full_path)
         print(f"[✅] Latest previous VLS file loaded: {latest_file}")
-    else:
-        print("[❌] No previous VLS files found.")
 
     if not df_previous.empty:
         df_previous_active = df_previous[df_previous['Status'] == 'A']
@@ -81,7 +83,6 @@ def main():
             if truly_removed:
                 truly_removed_df = removed[removed['ULIKey'].isin(truly_removed)]
                 expired_filename = f'VLS expired {today}.csv'
-                global expired_full_path
                 expired_full_path = os.path.join(folder_path, expired_filename)
                 truly_removed_df.to_csv(expired_full_path, index=False, encoding='utf-8-sig')
                 print(f"[📂] Truly expired listings saved as {expired_filename}")
@@ -102,6 +103,7 @@ def main():
         print("[🆕] Created new tracking database")
 
     today_date = datetime.now().date()
+
     new_listings = []
     for _, home in df_today.iterrows():
         if home['ULIKey'] not in df_tracking['ULIKey'].values:
@@ -118,7 +120,11 @@ def main():
         df_tracking = pd.concat([df_tracking, pd.DataFrame(new_listings)], ignore_index=True)
         print(f"[➕] Added {len(new_listings)} new listings to tracking database")
 
+    # ➕ Add DaysOnMarket and sort by it
     df_tracking['FirstSeen'] = pd.to_datetime(df_tracking['FirstSeen'])
+    df_tracking['DaysOnMarket'] = (today_date - df_tracking['FirstSeen'].dt.date).dt.days
+    df_tracking = df_tracking.sort_values(by='DaysOnMarket', ascending=False)
+
     five_months_ago = pd.to_datetime(today_date - timedelta(days=150))
     active_ulikeys = df_today['ULIKey'].tolist()
     aged_listings = df_tracking[
@@ -129,7 +135,6 @@ def main():
     df_tracking.to_csv(tracking_file, index=False, encoding='utf-8-sig')
     print(f"[💾] Updated tracking database with {len(df_tracking)} total listings")
 
-    global aged_full_path
     if not aged_listings.empty:
         current_aged = df_today[df_today['ULIKey'].isin(aged_listings['ULIKey'])].merge(
             df_tracking[['ULIKey', 'FirstSeen']],
@@ -138,42 +143,14 @@ def main():
         )
         current_aged['DaysOnMarket'] = (today_date - current_aged['FirstSeen'].dt.date).dt.days
         current_aged = current_aged.sort_values(by='DaysOnMarket', ascending=False)
+
         aged_filename = f'5 Month Listings {today}.csv'
         aged_full_path = os.path.join(folder_path, aged_filename)
         current_aged.to_csv(aged_full_path, index=False, encoding='utf-8-sig')
         print(f"[🏠] Found {len(current_aged)} listings on market 5+ months")
         print(f"[📊] Saved as '{aged_filename}'")
     else:
-        aged_full_path = None
         print("[✅] No listings have been on the market for 5+ months")
-
-    # === Send summary email ===
-    print("[📧] Preparing to send email...")
-    import yagmail
-
-    user = os.environ.get('EMAIL_USER')
-    password = os.environ.get('EMAIL_PASS')
-    recipient = os.environ.get('EMAIL_TO')
-
-    yag = yagmail.SMTP(user=user, password=password)
-
-    attachments = [
-        today_full_path,
-        expired_full_path if 'expired_full_path' in globals() and os.path.exists(expired_full_path) else None,
-        aged_full_path if aged_full_path and os.path.exists(aged_full_path) else None,
-        tracking_file if os.path.exists(tracking_file) else None
-    ]
-    attachments = [f for f in attachments if f]
-
-    body = f"""✅ VLS Tracker Summary ({today}):
-- Total homes: {len(all_homes)}
-- PreOwned Active homes: {len(filtered_homes)}
-- Truly expired: {len(truly_removed) if 'truly_removed' in locals() else 0}
-- 5+ Month listings: {len(aged_listings) if not aged_listings.empty else 0}
-"""
-
-    yag.send(to=recipient, subject=f"VLS Tracker Report - {today}", contents=body, attachments=attachments)
-    print("[✅] Email sent successfully!")
 
 if __name__ == '__main__':
     main()
