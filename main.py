@@ -8,8 +8,8 @@ from email.message import EmailMessage
 from email.utils import formataddr
 
 # Email config - replace these with your info or use GitHub secrets
-EMAIL_ADDRESS = os.getenv('EMAIL_ADDRESS')  # Your Gmail address
-EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')  # Your app password
+EMAIL_ADDRESS = os.getenv('EMAIL_USER')  # Your Gmail address
+EMAIL_PASSWORD = os.getenv('EMAIL_PASS')  # Your app password
 EMAIL_TO = os.getenv('EMAIL_TO')  # Recipient email
 
 # Set up folder path
@@ -147,16 +147,17 @@ def main():
         df_tracking = pd.concat([df_tracking, pd.DataFrame(new_listings)], ignore_index=True)
         print(f"[➕] Added {len(new_listings)} new listings to tracking database")
 
-    # Fix: Ensure FirstSeen is datetime before using .dt accessor
+    # Ensure FirstSeen is datetime type
     df_tracking['FirstSeen'] = pd.to_datetime(df_tracking['FirstSeen'], errors='coerce')
 
-    # Correct calculation of DaysOnMarket without double .dt chaining
-    df_tracking['DaysOnMarket'] = (pd.Timestamp(today_date) - df_tracking['FirstSeen']).dt.days
+    # Calculate DaysOnMarket as integer days difference
+    df_tracking['DaysOnMarket'] = (today_date - df_tracking['FirstSeen'].dt.date).dt.days
 
     active_ulikeys = df_today['ULIKey'].tolist()
+    # Filter aged listings: only those tracked 5 months or more (approx 150 days)
     aged_listings = df_tracking[
         (df_tracking['ULIKey'].isin(active_ulikeys)) &
-        (df_tracking['DaysOnMarket'] >= 0)
+        (df_tracking['DaysOnMarket'] >= 150)
     ].sort_values(by='DaysOnMarket', ascending=False)
 
     df_tracking.to_csv(tracking_file, index=False, encoding='utf-8-sig')
