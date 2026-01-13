@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 import smtplib
 from email.message import EmailMessage
@@ -89,18 +89,16 @@ def main():
     df_today.to_csv(today_full_path, index=False, encoding='utf-8-sig')
     print(f"[💾] Today's listings saved as {today_filename}")
 
-    vls_files = [f for f in os.listdir(folder_path) if re.match(r'VLS_\d{4}-\d{2}-\d{2}\.csv', f)]
-    vls_files = [f for f in vls_files if f != today_filename]
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    yesterday_filename = f'VLS_{yesterday}.csv'
+    yesterday_full_path = os.path.join(folder_path, yesterday_filename)
 
-    if not vls_files:
-        print("[❌] No previous VLS files found.")
+    if not os.path.exists(yesterday_full_path):
+        print(f"[❌] No previous-day VLS file found for {yesterday}.")
         df_previous = pd.DataFrame()
     else:
-        vls_files.sort(reverse=True)
-        latest_file = vls_files[0]
-        latest_full_path = os.path.join(folder_path, latest_file)
-        df_previous = pd.read_csv(latest_full_path)
-        print(f"[✅] Latest previous VLS file loaded: {latest_file}")
+        df_previous = pd.read_csv(yesterday_full_path)
+        print(f"[✅] Previous-day VLS file loaded: {yesterday_filename}")
 
     expired_full_path = None
     expired_count = 0
@@ -191,8 +189,6 @@ def main():
     attachments = []
     if expired_full_path and os.path.exists(expired_full_path):
         attachments.append(expired_full_path)
-    if os.path.exists(tracking_file):
-        attachments.append(tracking_file)
     if aged_full_path and os.path.exists(aged_full_path):
         attachments.append(aged_full_path)
 
