@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
 import smtplib
 from email.message import EmailMessage
@@ -20,6 +20,24 @@ folder_path = os.path.join(os.path.dirname(__file__), 'data')
 os.makedirs(folder_path, exist_ok=True)
 
 tracking_file = os.path.join(folder_path, 'listing_first_seen.csv')
+
+SNAPSHOT_PATTERN = re.compile(r"^VLS_(\d{4}-\d{2}-\d{2})\.csv$")
+
+
+def find_latest_snapshot(folder, today_str):
+    latest_date = None
+    latest_file = None
+    for filename in os.listdir(folder):
+        match = SNAPSHOT_PATTERN.match(filename)
+        if not match:
+            continue
+        snapshot_date = match.group(1)
+        if snapshot_date >= today_str:
+            continue
+        if latest_date is None or snapshot_date > latest_date:
+            latest_date = snapshot_date
+            latest_file = os.path.join(folder, filename)
+    return latest_file, latest_date
 
 def check_removed_listings_against_vls(removed_listings, vls_data):
     removed_ulikeys = removed_listings['ULIKey'].tolist()
@@ -66,6 +84,26 @@ def main():
     today_filename = f'VLS_{today}.csv'
     today_full_path = os.path.join(folder_path, today_filename)
 
+    listing_columns = [
+        "ULIKey",
+        "Address",
+        "Village",
+        "County",
+        "Model",
+        "Price",
+        "Bedrooms",
+        "Baths",
+        "SquareFeet",
+        "Garage",
+        "Pool",
+        "Latitude",
+        "Longitude",
+        "Status",
+        "SaleType",
+        "YouTubeVideoId",
+        "VLSNumber",
+    ]
+
     df_today = pd.DataFrame([{
         "ULIKey": home.get("ULIKey"),
         "Address": home.get("Address"),
@@ -84,24 +122,24 @@ def main():
         "SaleType": home.get("SaleType"),
         "YouTubeVideoId": home.get("YouTubeVideoId"),
         "VLSNumber": home.get("VLSNumber")
-    } for home in filtered_homes])
+    } for home in filtered_homes], columns=listing_columns)
 
     df_today.to_csv(today_full_path, index=False, encoding='utf-8-sig')
     print(f"[💾] Today's listings saved as {today_filename}")
 
-    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-    yesterday_filename = f'VLS_{yesterday}.csv'
-    yesterday_full_path = os.path.join(folder_path, yesterday_filename)
+    previous_snapshot_path, previous_snapshot_date = find_latest_snapshot(folder_path, today)
 
-    if not os.path.exists(yesterday_full_path):
-        print(f"[❌] No previous-day VLS file found for {yesterday}.")
+    if not previous_snapshot_path:
+        print("[❌] No prior VLS snapshot found to compare removals.")
         df_previous = pd.DataFrame()
     else:
-        df_previous = pd.read_csv(yesterday_full_path)
-        print(f"[✅] Previous-day VLS file loaded: {yesterday_filename}")
+        df_previous = pd.read_csv(previous_snapshot_path)
+        print(f"[✅] Previous VLS snapshot loaded: VLS_{previous_snapshot_date}.csv")
 
-    expired_full_path = None
+    expired_filename = f'VLS removed {today}.csv'
+    expired_full_path = os.path.join(folder_path, expired_filename)
     expired_count = 0
+    removed_headers = df_previous.columns.tolist() if not df_previous.empty else listing_columns
 
     if not df_previous.empty:
         df_previous_active = df_previous[df_previous['Status'] == 'A']
@@ -112,16 +150,23 @@ def main():
             if truly_removed:
                 truly_removed_df = removed[removed['ULIKey'].isin(truly_removed)]
                 expired_count = len(truly_removed_df)
-                expired_filename = f'VLS expired {today}.csv'
-                expired_full_path = os.path.join(folder_path, expired_filename)
                 truly_removed_df.to_csv(expired_full_path, index=False, encoding='utf-8-sig')
-                print(f"[📂] Truly expired listings saved as {expired_filename}")
+                print(f"[📂] Removed listings saved as {expired_filename}")
             else:
-                print("[✅] No truly expired listings found today.")
+                print("[✅] No truly removed listings found today.")
+                pd.DataFrame(columns=removed_headers).to_csv(
+                    expired_full_path, index=False, encoding='utf-8-sig'
+                )
         else:
             print("[✅] No removed listings detected today!")
+            pd.DataFrame(columns=removed_headers).to_csv(
+                expired_full_path, index=False, encoding='utf-8-sig'
+            )
     else:
         print("[⚠️] No previous file loaded, skipping removal check.")
+        pd.DataFrame(columns=removed_headers).to_csv(
+            expired_full_path, index=False, encoding='utf-8-sig'
+        )
 
     print("[🕒] Tracking listings age...")
 
@@ -162,17 +207,16 @@ def main():
     df_tracking.to_csv(tracking_file, index=False, encoding='utf-8-sig')
     print(f"[💾] Updated tracking database with {len(df_tracking)} total listings")
 
-    aged_filename = None
-    aged_full_path = None
+    aged_filename = f'5 Month Listings {today}.csv'
+    aged_full_path = os.path.join(folder_path, aged_filename)
 
     if not aged_listings.empty:
-        aged_filename = f'5 Month Listings {today}.csv'
-        aged_full_path = os.path.join(folder_path, aged_filename)
         aged_listings.to_csv(aged_full_path, index=False, encoding='utf-8-sig')
         print(f"[🏠] Found {len(aged_listings)} listings on market 5+ months")
         print(f"[📊] Saved as '{aged_filename}'")
     else:
         print("[✅] No listings have been on the market for 5+ months")
+        aged_listings.to_csv(aged_full_path, index=False, encoding='utf-8-sig')
 
     # Compose email content including expired count
     email_subject = f"VLS Tracker Report - {today}"
@@ -186,17 +230,9 @@ def main():
         f"Expired listings today: {expired_count}\n"
     )
 
-    attachments = []
-    if expired_full_path and os.path.exists(expired_full_path):
-        attachments.append(expired_full_path)
-    if aged_full_path and os.path.exists(aged_full_path):
-        attachments.append(aged_full_path)
-
-    if attachments:
-        send_email_with_attachments(email_subject, email_body, attachments)
-        print("[✉️] Email sent with attachments.")
-    else:
-        print("[⚠️] No attachments to send.")
+    attachments = [expired_full_path, aged_full_path]
+    send_email_with_attachments(email_subject, email_body, attachments)
+    print("[✉️] Email sent with attachments.")
 
 if __name__ == '__main__':
     main()
