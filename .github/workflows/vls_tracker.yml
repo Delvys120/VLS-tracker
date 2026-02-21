@@ -1,19 +1,18 @@
 name: Daily VLS Tracker
-
 on:
   schedule:
-    - cron: '0 12 * * *'   # Runs daily at 12:00 UTC (8 AM ET)
-  workflow_dispatch:       # Allow manual trigger
+    - cron: '0 12 * * *'
+  workflow_dispatch:
 
 jobs:
   run-tracker:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
     env:
       EMAIL_ADDRESS: ${{ secrets.EMAIL_USER }}
       EMAIL_PASSWORD: ${{ secrets.EMAIL_PASS }}
       EMAIL_TO: ${{ secrets.EMAIL_TO }}
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -29,14 +28,13 @@ jobs:
       - name: Run tracker script
         run: python main.py
 
-      - name: Commit updated CSV files to repo
+      - name: Commit updated data files to repo
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/listing_first_seen.csv
-          git add data/VLS\ expired*.csv || echo "No expired files to add"
+          git add data/
           if ! git diff --cached --quiet; then
-            git commit -m "Update listing_first_seen.csv and expired listings from daily VLS tracker"
+            git commit -m "Daily VLS snapshot + tracking update $(date +'%Y-%m-%d')"
             git push
           else
             echo "No changes to commit."
