@@ -1,7 +1,7 @@
 name: Daily VLS Tracker
 on:
   schedule:
-    - cron: '0 12 * * *'
+    - cron: '0 12 * * *'   # Daily at 12:00 UTC (8 AM ET)
   workflow_dispatch:
 
 jobs:
@@ -25,9 +25,23 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run tracker script
+      # ── Run owner lookup update every Sunday ─────────────────────────────
+      - name: Update owner lookup (weekly, Sundays only)
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && startsWith(github.event.schedule, '0 12') && contains(github.run_id, '0'))
+        run: |
+          DAY=$(date +%u)   # 1=Mon ... 7=Sun
+          if [ "$DAY" = "7" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Sunday or manual trigger — running owner lookup update..."
+            python update_owner_lookup.py
+          else
+            echo "Not Sunday (day=$DAY) — skipping owner lookup update."
+          fi
+
+      # ── Run daily VLS tracker ─────────────────────────────────────────────
+      - name: Run daily VLS tracker
         run: python main.py
 
+      # ── Commit all updated data files ─────────────────────────────────────
       - name: Commit updated data files to repo
         run: |
           git config user.name "github-actions[bot]"
