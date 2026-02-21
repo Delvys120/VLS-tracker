@@ -10,9 +10,9 @@ from email.utils import formataddr
 # ─────────────────────────────────────────────
 # Email config — loaded from GitHub Secrets
 # ─────────────────────────────────────────────
-EMAIL_ADDRESS = os.getenv('EMAIL_ADDRESS')   # matches yml: EMAIL_ADDRESS
-EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD') # matches yml: EMAIL_PASSWORD
-EMAIL_TO = os.getenv('EMAIL_TO')             # matches yml: EMAIL_TO
+EMAIL_ADDRESS = os.getenv('EMAIL_ADDRESS')
+EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
+EMAIL_TO = os.getenv('EMAIL_TO')
 
 if not EMAIL_ADDRESS or not EMAIL_PASSWORD or not EMAIL_TO:
     raise ValueError("❌ Missing EMAIL_ADDRESS, EMAIL_PASSWORD, or EMAIL_TO in GitHub secrets.")
@@ -24,6 +24,7 @@ folder_path = os.path.join(os.path.dirname(__file__), 'data')
 os.makedirs(folder_path, exist_ok=True)
 
 tracking_file = os.path.join(folder_path, 'listing_first_seen.csv')
+owner_lookup_file = os.path.join(folder_path, 'owner_lookup.csv')
 
 SNAPSHOT_PATTERN = re.compile(r"^VLS_(\d{4}-\d{2}-\d{2})\.csv$")
 
@@ -31,23 +32,10 @@ SNAPSHOT_PATTERN = re.compile(r"^VLS_(\d{4}-\d{2}-\d{2})\.csv$")
 # Columns to save in daily snapshot
 # ─────────────────────────────────────────────
 LISTING_COLUMNS = [
-    "ULIKey",
-    "Address",
-    "Village",
-    "County",
-    "Model",
-    "Price",
-    "Bedrooms",
-    "Baths",
-    "SquareFeet",
-    "Garage",
-    "Pool",
-    "Latitude",
-    "Longitude",
-    "Status",
-    "SaleType",
-    "YouTubeVideoId",
-    "VLSNumber",
+    "ULIKey", "Address", "Village", "County", "Model", "Price",
+    "Bedrooms", "Baths", "SquareFeet", "Garage", "Pool",
+    "Latitude", "Longitude", "Status", "SaleType",
+    "YouTubeVideoId", "VLSNumber",
 ]
 
 
@@ -72,15 +60,80 @@ def find_latest_snapshot(folder, today_str):
 
 
 def check_removed_listings_against_vls(removed_df, all_homes):
-    """
-    Double-check: confirm a listing is truly gone from the full API response
-    (not just filtered out). A home that went pending or under contract may
-    still appear in all_homes but with a different status — we want those too.
-    This catches edge cases where our filter excludes something temporarily.
-    """
+    """Confirm listings are truly gone from the full API (not just filtered out)."""
     all_ulikeys = {home.get("ULIKey") for home in all_homes}
-    truly_removed_mask = ~removed_df['ULIKey'].isin(all_ulikeys)
-    return removed_df[truly_removed_mask]
+    return removed_df[~removed_df['ULIKey'].isin(all_ulikeys)]
+
+
+def normalize_address(addr):
+    """Normalize an address string for matching (uppercase, strip extra spaces)."""
+    if not addr or not isinstance(addr, str):
+        return ''
+    # Remove unit/apt designators that may differ between VLS and county records
+    addr = re.sub(r'\b(APT|UNIT|STE|#)\s*\S+', '', addr, flags=re.IGNORECASE)
+    addr = re.sub(r'\s+', ' ', addr).strip().upper()
+    return addr
+
+
+def load_owner_lookup():
+    """
+    Load the county NAL owner lookup table built by update_owner_lookup.py.
+    Returns a dict keyed by normalized physical address -> owner name.
+    """
+    if not os.path.exists(owner_lookup_file):
+        print("[⚠️] owner_lookup.csv not found. Run update_owner_lookup.py first.")
+        print("     Owner names will NOT be added this run.")
+        return {}
+
+    df = pd.read_csv(owner_lookup_file, dtype=str, low_memory=False)
+    df['FULL_PHY_ADDR'] = df['FULL_PHY_ADDR'].fillna('').str.upper().str.strip()
+    df['OWN_NAME'] = df['OWN_NAME'].fillna('').str.strip()
+
+    # Build lookup dict: normalized_address -> owner_name
+    lookup = {}
+    for _, row in df.iterrows():
+        addr_key = normalize_address(row['FULL_PHY_ADDR'])
+        if addr_key:
+            lookup[addr_key] = row['OWN_NAME']
+
+    print(f"[✅] Owner lookup loaded: {len(lookup):,} addresses across counties")
+    return lookup
+
+
+def lookup_owner(address, owner_lookup):
+    """
+    Try to find an owner name for a VLS address.
+    VLS addresses look like: '1234 SOME ST, THE VILLAGES, FL 32163'
+    We extract just the street portion for matching.
+    """
+    if not address or not owner_lookup:
+        return ''
+
+    # Extract street number + name (everything before the first comma)
+    street = address.split(',')[0].strip()
+    normalized = normalize_address(street)
+
+    # Direct match first
+    if normalized in owner_lookup:
+        return owner_lookup[normalized]
+
+    # Partial match fallback for minor differences (ST vs STREET, etc.)
+    for key, name in owner_lookup.items():
+        if len(normalized) >= 10 and key.startswith(normalized[:15]):
+            return name
+
+    return ''
+
+
+def add_owner_names(df, owner_lookup):
+    """Add OwnerName column to a DataFrame of listings."""
+    if not owner_lookup:
+        df['OwnerName'] = ''
+        return df
+    df['OwnerName'] = df['Address'].apply(lambda addr: lookup_owner(addr, owner_lookup))
+    matched = (df['OwnerName'] != '').sum()
+    print(f"[👤] Owner names matched: {matched}/{len(df)} listings ({matched/max(len(df),1)*100:.0f}%)")
+    return df
 
 
 def send_email_with_attachments(subject, body, attachments):
@@ -111,7 +164,10 @@ def send_email_with_attachments(subject, body, attachments):
 def main():
     print("[▶️] Script started")
 
-    # ── 1. Fetch today's VLS data ──────────────────────────────────────────
+    # ── 1. Load owner lookup ───────────────────────────────────────────────
+    owner_lookup = load_owner_lookup()
+
+    # ── 2. Fetch today's VLS data ──────────────────────────────────────────
     url = "https://api.thevillages.com/hf/search/allhomelisting"
     response = requests.get(url, timeout=30)
     response.raise_for_status()
@@ -126,37 +182,37 @@ def main():
     ]
     print(f"[🏡] Filtered PreOwned & Active homes: {len(filtered_homes)}")
 
-    # ── 2. Build today's DataFrame ─────────────────────────────────────────
+    # ── 3. Build today's DataFrame ─────────────────────────────────────────
     today = datetime.now().strftime('%Y-%m-%d')
     today_date = datetime.now().date()
 
     df_today = pd.DataFrame([{
-        "ULIKey":        home.get("ULIKey"),
-        "Address":       home.get("Address"),
-        "Village":       home.get("Village"),
-        "County":        home.get("County"),
-        "Model":         home.get("Model"),
-        "Price":         home.get("Price", "").replace("$", "").replace(",", "") if home.get("Price") else "",
-        "Bedrooms":      home.get("Bedrooms"),
-        "Baths":         home.get("Baths"),
-        "SquareFeet":    home.get("SquareFeet"),
-        "Garage":        home.get("Garage"),
-        "Pool":          home.get("Pool"),
-        "Latitude":      home.get("GISLat"),
-        "Longitude":     home.get("GISLong"),
-        "Status":        home.get("ListingStatus"),
-        "SaleType":      home.get("SaleType"),
-        "YouTubeVideoId":home.get("YouTubeVideoId"),
-        "VLSNumber":     home.get("VLSNumber"),
+        "ULIKey":         home.get("ULIKey"),
+        "Address":        home.get("Address"),
+        "Village":        home.get("Village"),
+        "County":         home.get("County"),
+        "Model":          home.get("Model"),
+        "Price":          home.get("Price", "").replace("$", "").replace(",", "") if home.get("Price") else "",
+        "Bedrooms":       home.get("Bedrooms"),
+        "Baths":          home.get("Baths"),
+        "SquareFeet":     home.get("SquareFeet"),
+        "Garage":         home.get("Garage"),
+        "Pool":           home.get("Pool"),
+        "Latitude":       home.get("GISLat"),
+        "Longitude":      home.get("GISLong"),
+        "Status":         home.get("ListingStatus"),
+        "SaleType":       home.get("SaleType"),
+        "YouTubeVideoId": home.get("YouTubeVideoId"),
+        "VLSNumber":      home.get("VLSNumber"),
     } for home in filtered_homes], columns=LISTING_COLUMNS)
 
-    # ── 3. Save today's snapshot ───────────────────────────────────────────
+    # ── 4. Save today's snapshot ───────────────────────────────────────────
     today_filename = f'VLS_{today}.csv'
     today_full_path = os.path.join(folder_path, today_filename)
     df_today.to_csv(today_full_path, index=False, encoding='utf-8-sig')
     print(f"[💾] Today's snapshot saved: {today_filename}")
 
-    # ── 4. Load previous snapshot ──────────────────────────────────────────
+    # ── 5. Load previous snapshot ──────────────────────────────────────────
     previous_snapshot_path, previous_snapshot_date = find_latest_snapshot(folder_path, today)
     is_first_run = previous_snapshot_path is None
 
@@ -167,7 +223,7 @@ def main():
         df_previous = pd.read_csv(previous_snapshot_path)
         print(f"[✅] Previous snapshot loaded: VLS_{previous_snapshot_date}.csv ({len(df_previous)} listings)")
 
-    # ── 5. Detect removed listings ─────────────────────────────────────────
+    # ── 6. Detect removed listings ─────────────────────────────────────────
     removed_filename = f'VLS_removed_{today}.csv'
     removed_full_path = os.path.join(folder_path, removed_filename)
     expired_count = 0
@@ -179,16 +235,27 @@ def main():
         if not removed_candidates.empty:
             truly_removed_df = check_removed_listings_against_vls(removed_candidates, all_homes)
             expired_count = len(truly_removed_df)
-            truly_removed_df.to_csv(removed_full_path, index=False, encoding='utf-8-sig')
-            print(f"[📂] {expired_count} removed listing(s) saved: {removed_filename}")
+
+            if expired_count > 0:
+                truly_removed_df = add_owner_names(truly_removed_df.copy(), owner_lookup)
+                truly_removed_df.to_csv(removed_full_path, index=False, encoding='utf-8-sig')
+                print(f"[📂] {expired_count} removed listing(s) saved: {removed_filename}")
+            else:
+                print("[✅] No truly removed listings found today.")
+                pd.DataFrame(columns=LISTING_COLUMNS + ['OwnerName']).to_csv(
+                    removed_full_path, index=False, encoding='utf-8-sig'
+                )
         else:
             print("[✅] No removed listings detected today.")
-            pd.DataFrame(columns=LISTING_COLUMNS).to_csv(removed_full_path, index=False, encoding='utf-8-sig')
+            pd.DataFrame(columns=LISTING_COLUMNS + ['OwnerName']).to_csv(
+                removed_full_path, index=False, encoding='utf-8-sig'
+            )
     else:
-        # Write empty file so attachment always exists
-        pd.DataFrame(columns=LISTING_COLUMNS).to_csv(removed_full_path, index=False, encoding='utf-8-sig')
+        pd.DataFrame(columns=LISTING_COLUMNS + ['OwnerName']).to_csv(
+            removed_full_path, index=False, encoding='utf-8-sig'
+        )
 
-    # ── 6. Update listing age tracking ────────────────────────────────────
+    # ── 7. Update listing age tracking ────────────────────────────────────
     print("[🕒] Updating listing age tracker...")
 
     if os.path.exists(tracking_file):
@@ -198,7 +265,6 @@ def main():
         df_tracking = pd.DataFrame(columns=['ULIKey', 'FirstSeen', 'Address', 'Village', 'Price', 'VLSNumber'])
         print("[🆕] No tracking file found — creating fresh database")
 
-    # Add brand-new listings
     existing_ulikeys = set(df_tracking['ULIKey'].values)
     new_listings = []
     for _, home in df_today.iterrows():
@@ -218,7 +284,6 @@ def main():
     else:
         print("[✅] No new listings to add to tracker")
 
-    # Calculate days on market
     df_tracking['FirstSeen'] = pd.to_datetime(df_tracking['FirstSeen'], errors='coerce')
     df_tracking['DaysOnMarket'] = df_tracking['FirstSeen'].apply(
         lambda d: (today_date - d.date()).days if pd.notna(d) else None
@@ -227,12 +292,15 @@ def main():
     df_tracking.to_csv(tracking_file, index=False, encoding='utf-8-sig')
     print(f"[💾] Tracking database saved: {len(df_tracking)} total listings")
 
-    # ── 7. Build 5-month aged listings report ─────────────────────────────
+    # ── 8. Build 5-month aged listings report ─────────────────────────────
     active_ulikeys = set(df_today['ULIKey'].tolist())
     aged_listings = df_tracking[
         (df_tracking['ULIKey'].isin(active_ulikeys)) &
         (df_tracking['DaysOnMarket'] >= 150)
-    ].sort_values(by='DaysOnMarket', ascending=False)
+    ].sort_values(by='DaysOnMarket', ascending=False).copy()
+
+    if not aged_listings.empty:
+        aged_listings = add_owner_names(aged_listings, owner_lookup)
 
     aged_filename = f'VLS_5month_{today}.csv'
     aged_full_path = os.path.join(folder_path, aged_filename)
@@ -243,7 +311,9 @@ def main():
     else:
         print("[✅] No listings on market 5+ months")
 
-    # ── 8. Send email ──────────────────────────────────────────────────────
+    # ── 9. Send email ──────────────────────────────────────────────────────
+    owner_lookup_status = f"{len(owner_lookup):,} addresses loaded" if owner_lookup else "NOT LOADED — run update_owner_lookup.py"
+
     email_subject = f"VLS Tracker Report — {today}"
 
     if is_first_run:
@@ -255,6 +325,7 @@ def main():
             f"Total homes from API:          {len(all_homes)}\n"
             f"PreOwned & Active filtered:    {len(filtered_homes)}\n"
             f"Tracking DB initialized with:  {len(df_tracking)} listings\n"
+            f"Owner lookup:                  {owner_lookup_status}\n"
         )
     else:
         email_body = (
@@ -266,10 +337,11 @@ def main():
             f"Total tracked listings:        {len(df_tracking)}\n"
             f"Removed (sold/expired) today:  {expired_count}\n"
             f"Listings on market 5+ months:  {len(aged_listings)}\n"
+            f"Owner lookup:                  {owner_lookup_status}\n"
             f"─────────────────────────────\n\n"
             f"Attachments:\n"
-            f"  • {removed_filename} — listings no longer on VLS\n"
-            f"  • {aged_filename}    — listings active 150+ days\n"
+            f"  • {removed_filename} — listings no longer on VLS (with owner names)\n"
+            f"  • {aged_filename}    — listings active 150+ days (with owner names)\n"
         )
 
     attachments = [removed_full_path, aged_full_path]
