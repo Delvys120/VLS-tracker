@@ -69,17 +69,12 @@ def normalize_address(addr):
     """Normalize an address string for matching (uppercase, strip extra spaces)."""
     if not addr or not isinstance(addr, str):
         return ''
-    # Remove unit/apt designators that may differ between VLS and county records
     addr = re.sub(r'\b(APT|UNIT|STE|#)\s*\S+', '', addr, flags=re.IGNORECASE)
     addr = re.sub(r'\s+', ' ', addr).strip().upper()
     return addr
 
 
 def load_owner_lookup():
-    """
-    Load the county NAL owner lookup table built by update_owner_lookup.py.
-    Returns a dict keyed by normalized physical address -> owner name.
-    """
     if not os.path.exists(owner_lookup_file):
         print("[⚠️] owner_lookup.csv not found. Run update_owner_lookup.py first.")
         print("     Owner names will NOT be added this run.")
@@ -89,7 +84,6 @@ def load_owner_lookup():
     df['FULL_PHY_ADDR'] = df['FULL_PHY_ADDR'].fillna('').str.upper().str.strip()
     df['OWN_NAME'] = df['OWN_NAME'].fillna('').str.strip()
 
-    # Build lookup dict: normalized_address -> owner_name
     lookup = {}
     for _, row in df.iterrows():
         addr_key = normalize_address(row['FULL_PHY_ADDR'])
@@ -101,27 +95,15 @@ def load_owner_lookup():
 
 
 def lookup_owner(address, owner_lookup):
-    """
-    Try to find an owner name for a VLS address.
-    VLS addresses look like: '1234 SOME ST, THE VILLAGES, FL 32163'
-    We extract just the street portion for matching.
-    """
     if not address or not owner_lookup:
         return ''
-
-    # Extract street number + name (everything before the first comma)
     street = address.split(',')[0].strip()
     normalized = normalize_address(street)
-
-    # Direct match first
     if normalized in owner_lookup:
         return owner_lookup[normalized]
-
-    # Partial match fallback for minor differences (ST vs STREET, etc.)
     for key, name in owner_lookup.items():
         if len(normalized) >= 10 and key.startswith(normalized[:15]):
             return name
-
     return ''
 
 
@@ -134,6 +116,36 @@ def add_owner_names(df, owner_lookup):
     matched = (df['OwnerName'] != '').sum()
     print(f"[👤] Owner names matched: {matched}/{len(df)} listings ({matched/max(len(df),1)*100:.0f}%)")
     return df
+
+
+def build_removed_table(truly_removed_df):
+    """Build a plain-text table of removed listings for the email body."""
+    if truly_removed_df is None or truly_removed_df.empty:
+        return "  No removed listings today.\n"
+
+    lines = []
+    lines.append(f"  {'ADDRESS':<40} {'VILLAGE':<20} {'COUNTY':<10} {'PRICE':>10}  {'BED/BATH':<10}  {'SQFT':>6}  {'VLS#':<10}")
+    lines.append("  " + "-" * 118)
+
+    for _, row in truly_removed_df.iterrows():
+        address = str(row.get('Address', 'N/A'))[:38]
+        village = str(row.get('Village', 'N/A'))[:18]
+        county  = str(row.get('County', 'N/A'))[:8]
+        bed     = str(row.get('Bedrooms', '?'))
+        bath    = str(row.get('Baths', '?'))
+        sqft    = str(row.get('SquareFeet', 'N/A'))
+        vls     = str(row.get('VLSNumber', 'N/A'))
+
+        raw_price = str(row.get('Price', ''))
+        try:
+            price = f"${int(float(raw_price)):,}" if raw_price and raw_price != 'nan' else 'N/A'
+        except (ValueError, TypeError):
+            price = 'N/A'
+
+        bedbath = f"{bed}bd/{bath}ba"
+        lines.append(f"  {address:<40} {village:<20} {county:<10} {price:>10}  {bedbath:<10}  {sqft:>6}  {vls:<10}")
+
+    return "\n".join(lines) + "\n"
 
 
 def send_email_with_attachments(subject, body, attachments):
@@ -227,6 +239,7 @@ def main():
     removed_filename = f'VLS_removed_{today}.csv'
     removed_full_path = os.path.join(folder_path, removed_filename)
     expired_count = 0
+    truly_removed_df = None
 
     if not is_first_run:
         df_previous_active = df_previous[df_previous['Status'] == 'A']
@@ -311,8 +324,10 @@ def main():
     else:
         print("[✅] No listings on market 5+ months")
 
-    # ── 9. Send email ──────────────────────────────────────────────────────
+    # ── 9. Build and send email ────────────────────────────────────────────
     owner_lookup_status = f"{len(owner_lookup):,} addresses loaded" if owner_lookup else "NOT LOADED — run update_owner_lookup.py"
+
+    removed_table = build_removed_table(truly_removed_df)
 
     email_subject = f"VLS Tracker Report — {today}"
 
@@ -339,9 +354,13 @@ def main():
             f"Listings on market 5+ months:  {len(aged_listings)}\n"
             f"Owner lookup:                  {owner_lookup_status}\n"
             f"─────────────────────────────\n\n"
+            f"REMOVED / SOLD LISTINGS TODAY ({expired_count})\n"
+            f"{'─' * 107}\n"
+            f"{removed_table}\n"
+            f"─────────────────────────────\n"
             f"Attachments:\n"
-            f"  • {removed_filename} — listings no longer on VLS (with owner names)\n"
-            f"  • {aged_filename}    — listings active 150+ days (with owner names)\n"
+            f"  • {removed_filename} — full removed listings CSV\n"
+            f"  • {aged_filename}    — listings active 150+ days\n"
         )
 
     attachments = [removed_full_path, aged_full_path]
